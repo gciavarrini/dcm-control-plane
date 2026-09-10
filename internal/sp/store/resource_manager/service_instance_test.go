@@ -2,6 +2,8 @@ package store_test
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	agentmodel "github.com/dcm-project/control-plane/internal/agent/store/model"
 	"github.com/dcm-project/control-plane/internal/sp/store/model"
@@ -711,6 +713,54 @@ var _ = Describe("ServiceTypeInstance Store", func() {
 			pending, err := s.ListPendingDeletions(ctx)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(pending).To(BeEmpty())
+		})
+	})
+
+	Describe("ClaimPendingDeletions", func() {
+		It("claims SCHEDULED instances and excludes them from a second claimer", func() {
+			inst1 := addInstanceToStore(newServiceTypeInstance("claim1", map[string]any{}))
+			inst2 := addInstanceToStore(newServiceTypeInstance("claim2", map[string]any{}))
+			Expect(s.MarkForDeletion(ctx, inst1.ID)).To(Succeed())
+			Expect(s.MarkForDeletion(ctx, inst2.ID)).To(Succeed())
+
+			now := time.Now()
+			claimUntil := now.Add(5 * time.Minute)
+
+			first, err := s.ClaimPendingDeletions(ctx, now, claimUntil, 0)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(first).To(HaveLen(2))
+
+			second, err := s.ClaimPendingDeletions(ctx, now, claimUntil.Add(time.Minute), 0)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(second).To(BeEmpty())
+		})
+
+		It("allows reclaim after the lease expires", func() {
+			inst := addInstanceToStore(newServiceTypeInstance("reclaim", map[string]any{}))
+			Expect(s.MarkForDeletion(ctx, inst.ID)).To(Succeed())
+
+			now := time.Now()
+			first, err := s.ClaimPendingDeletions(ctx, now, now.Add(time.Minute), 0)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(first).To(HaveLen(1))
+
+			later := now.Add(2 * time.Minute)
+			second, err := s.ClaimPendingDeletions(ctx, later, later.Add(time.Minute), 0)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(second).To(HaveLen(1))
+			Expect(second[0].ID).To(Equal(inst.ID))
+		})
+
+		It("respects the claim limit", func() {
+			for i := 0; i < 3; i++ {
+				inst := addInstanceToStore(newServiceTypeInstance(fmt.Sprintf("limit-%d", i), map[string]any{}))
+				Expect(s.MarkForDeletion(ctx, inst.ID)).To(Succeed())
+			}
+
+			now := time.Now()
+			claimed, err := s.ClaimPendingDeletions(ctx, now, now.Add(time.Minute), 1)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(claimed).To(HaveLen(1))
 		})
 	})
 

@@ -1,4 +1,8 @@
 // Package cleanup implements stale instance cleanup scheduling.
+//
+// Multi-instance safety uses DB-backed claiming (not leader election): each
+// replica leases SCHEDULED deletion rows before processing so only one
+// instance handles a given deletion at a time.
 package cleanup
 
 import (
@@ -14,6 +18,10 @@ import (
 	"github.com/dcm-project/control-plane/internal/sp/store"
 	"github.com/dcm-project/control-plane/internal/sp/store/model"
 )
+
+// deletionClaimTTL keeps a claimed deletion off other replicas while this
+// worker publishes to the agent. Expired leases become claimable again.
+const deletionClaimTTL = 5 * time.Minute
 
 type Scheduler struct {
 	store      store.Store
@@ -79,11 +87,13 @@ func (s *Scheduler) runCycle(ctx context.Context) {
 	s.ProcessPendingDeletions(cycleCtx)
 }
 
+// ProcessPendingDeletions claims and attempts deferred deletions.
 func (s *Scheduler) ProcessPendingDeletions(ctx context.Context) {
 	log := logging.FromContext(ctx)
-	pending, err := s.store.ServiceTypeInstance().ListPendingDeletions(ctx)
+	now := time.Now()
+	pending, err := s.store.ServiceTypeInstance().ClaimPendingDeletions(ctx, now, now.Add(deletionClaimTTL), 0)
 	if err != nil {
-		log.Error("Error listing pending deletions", "error", err)
+		log.Error("Error claiming pending deletions", "error", err)
 		return
 	}
 
