@@ -82,8 +82,9 @@ services:
       timeout: 5s
       retries: 5
 
-  # Second replica for multi-instance worker claiming tests. Shares Postgres/NATS.
+  # HA worker tests only (profile "ha"); default stack stays single-replica for self-heal.
   control-plane-2:
+    profiles: ["ha"]
     build:
       context: ../../..
       dockerfile: Containerfile
@@ -92,6 +93,8 @@ services:
     ports:
       - "8081:8080"
     depends_on:
+      control-plane:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       provider-wiremock:

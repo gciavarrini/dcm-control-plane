@@ -70,7 +70,12 @@ func (c *agentDeleteCounter) close() {
 // Requires docker-compose.yaml control-plane-2 (two replicas sharing Postgres).
 var _ = Describe("HA background workers", func() {
 	BeforeEach(func() {
+		ensureControlPlane2Replica()
 		requireTwoControlPlaneReplicas()
+	})
+
+	AfterEach(func() {
+		stopControlPlane2Replica()
 	})
 
 	It("runs deferred cleanup only once with two control-plane replicas", func() {
