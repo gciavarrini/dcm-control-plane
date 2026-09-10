@@ -56,6 +56,24 @@ func natsURL() string {
 	return "nats://localhost:4222"
 }
 
+func controlPlane2BaseURL() string {
+	if url := os.Getenv("CONTROL_PLANE_2_URL"); url != "" {
+		return url
+	}
+	return "http://localhost:8081/api/v1alpha1"
+}
+
+// requireTwoControlPlaneReplicas fails fast when compose is missing the second
+// replica the HA worker tests depend on.
+func requireTwoControlPlaneReplicas() {
+	for _, healthURL := range []string{apiBaseURL() + "/health", controlPlane2BaseURL() + "/health"} {
+		resp, err := http.Get(healthURL)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		ExpectWithOffset(1, resp.StatusCode).To(Equal(http.StatusOK), "expected healthy control-plane at %s", healthURL)
+		resp.Body.Close()
+	}
+}
+
 // publishResponseEvent simulates a real agent's response for resourceID,
 // since this stack has no live agent to send one. It publishes directly to
 // messaging.ResponseSubject - the same wire contract consumer.ResponseConsumer
