@@ -357,8 +357,10 @@ func (s *ServiceTypeInstanceStore) ListPendingDeletions(ctx context.Context) ([]
 }
 
 // ClaimPendingDeletions leases up to limit SCHEDULED deletions that are not
-// already claimed. On Postgres this uses FOR UPDATE SKIP LOCKED; elsewhere a
-// conditional UPDATE loop (SQLite-friendly) ensures only one winner per row.
+// already claimed. Rows never attempted are preferred over recently retried
+// ones so a large backlog cannot starve newer deletions. On Postgres this
+// uses FOR UPDATE SKIP LOCKED; elsewhere a conditional UPDATE loop
+// (SQLite-friendly) ensures only one winner per row.
 func (s *ServiceTypeInstanceStore) ClaimPendingDeletions(ctx context.Context, now, claimUntil time.Time, limit int) ([]model.ServiceTypeInstance, error) {
 	if limit <= 0 {
 		limit = 100
@@ -376,7 +378,7 @@ func (s *ServiceTypeInstanceStore) claimPendingDeletionsSkipLocked(ctx context.C
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 			Where("deletion_status = ? AND (deletion_claimed_until IS NULL OR deletion_claimed_until <= ?)",
 				DeletionStatusScheduled, now).
-			Order("deletion_requested_at ASC").
+			Order(pendingDeletionClaimOrder(s.db)).
 			Limit(limit).
 			Find(&rows).Error; err != nil {
 			return err
@@ -399,7 +401,7 @@ func (s *ServiceTypeInstanceStore) claimPendingDeletionsOptimistic(ctx context.C
 	if err := s.db.WithContext(ctx).
 		Where("deletion_status = ? AND (deletion_claimed_until IS NULL OR deletion_claimed_until <= ?)",
 			DeletionStatusScheduled, now).
-		Order("deletion_requested_at ASC").
+		Order(pendingDeletionClaimOrder(s.db)).
 		Limit(limit).
 		Find(&candidates).Error; err != nil {
 		return nil, err

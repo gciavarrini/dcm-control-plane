@@ -120,4 +120,48 @@ var _ = Describe("ClaimPendingDeletions on Postgres", func() {
 		Expect(seen[inst1.ID]).To(Equal(1))
 		Expect(seen[inst2.ID]).To(Equal(1))
 	})
+
+	It("prefers never-attempted deletions over recently retried backlog rows", func() {
+		const backlogSize = 100
+		const total = backlogSize + 1
+		base := time.Now().Add(-time.Hour)
+		ids := make([]string, total)
+
+		for i := 0; i < total; i++ {
+			inst, err := s.Create(ctx, newServiceTypeInstance(fmt.Sprintf("pg-fair-%d", i), map[string]any{}))
+			Expect(err).NotTo(HaveOccurred())
+			ids[i] = inst.ID
+			Expect(s.MarkForDeletion(ctx, inst.ID)).To(Succeed())
+			requestedAt := base.Add(time.Duration(i) * time.Second)
+			Expect(db.Model(&model.ServiceTypeInstance{}).Where("id = ?", inst.ID).
+				Update("deletion_requested_at", requestedAt).Error).NotTo(HaveOccurred())
+		}
+
+		now := time.Now()
+		claimUntil := now.Add(5 * time.Minute)
+
+		first, err := s.ClaimPendingDeletions(ctx, now, claimUntil, backlogSize)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(first).To(HaveLen(backlogSize))
+
+		firstClaimed := make(map[string]bool, len(first))
+		for _, inst := range first {
+			firstClaimed[inst.ID] = true
+		}
+		Expect(firstClaimed).NotTo(HaveKey(ids[total-1]))
+
+		for _, inst := range first {
+			Expect(s.IncrementDeletionRetry(ctx, inst.ID)).To(Succeed())
+			Expect(s.ReleaseDeletionClaim(ctx, inst.ID)).To(Succeed())
+		}
+
+		second, err := s.ClaimPendingDeletions(ctx, now.Add(time.Minute), claimUntil.Add(time.Minute), backlogSize)
+		Expect(err).NotTo(HaveOccurred())
+
+		secondClaimed := make(map[string]bool, len(second))
+		for _, inst := range second {
+			secondClaimed[inst.ID] = true
+		}
+		Expect(secondClaimed).To(HaveKey(ids[total-1]))
+	})
 })

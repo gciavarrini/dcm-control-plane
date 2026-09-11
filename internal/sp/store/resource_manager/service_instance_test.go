@@ -762,6 +762,67 @@ var _ = Describe("ServiceTypeInstance Store", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(claimed).To(HaveLen(1))
 		})
+
+		It("prefers never-attempted deletions over recently retried backlog rows", func() {
+			const backlogSize = 100
+			const total = backlogSize + 1
+			base := time.Now().Add(-time.Hour)
+			ids := make([]string, total)
+
+			for i := 0; i < total; i++ {
+				inst := addInstanceToStore(newServiceTypeInstance(fmt.Sprintf("fair-%d", i), map[string]any{}))
+				ids[i] = inst.ID
+				Expect(s.MarkForDeletion(ctx, inst.ID)).To(Succeed())
+				requestedAt := base.Add(time.Duration(i) * time.Second)
+				Expect(db.Model(&model.ServiceTypeInstance{}).Where("id = ?", inst.ID).
+					Update("deletion_requested_at", requestedAt).Error).NotTo(HaveOccurred())
+			}
+
+			now := time.Now()
+			claimUntil := now.Add(5 * time.Minute)
+
+			first, err := s.ClaimPendingDeletions(ctx, now, claimUntil, backlogSize)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(first).To(HaveLen(backlogSize))
+
+			firstClaimed := make(map[string]bool, len(first))
+			for _, inst := range first {
+				firstClaimed[inst.ID] = true
+			}
+			Expect(firstClaimed).NotTo(HaveKey(ids[total-1]))
+
+			for _, inst := range first {
+				Expect(s.IncrementDeletionRetry(ctx, inst.ID)).To(Succeed())
+				Expect(s.ReleaseDeletionClaim(ctx, inst.ID)).To(Succeed())
+			}
+
+			second, err := s.ClaimPendingDeletions(ctx, now.Add(time.Minute), claimUntil.Add(time.Minute), backlogSize)
+			Expect(err).NotTo(HaveOccurred())
+
+			secondClaimed := make(map[string]bool, len(second))
+			for _, inst := range second {
+				secondClaimed[inst.ID] = true
+			}
+			Expect(secondClaimed).To(HaveKey(ids[total-1]))
+		})
+
+		It("orders never-attempted rows by deletion_requested_at", func() {
+			base := time.Now().Add(-time.Hour)
+			older := addInstanceToStore(newServiceTypeInstance("fair-older", map[string]any{}))
+			newer := addInstanceToStore(newServiceTypeInstance("fair-newer", map[string]any{}))
+			Expect(s.MarkForDeletion(ctx, older.ID)).To(Succeed())
+			Expect(s.MarkForDeletion(ctx, newer.ID)).To(Succeed())
+			Expect(db.Model(&model.ServiceTypeInstance{}).Where("id = ?", older.ID).
+				Update("deletion_requested_at", base).Error).NotTo(HaveOccurred())
+			Expect(db.Model(&model.ServiceTypeInstance{}).Where("id = ?", newer.ID).
+				Update("deletion_requested_at", base.Add(time.Minute)).Error).NotTo(HaveOccurred())
+
+			now := time.Now()
+			claimed, err := s.ClaimPendingDeletions(ctx, now, now.Add(time.Minute), 1)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(claimed).To(HaveLen(1))
+			Expect(claimed[0].ID).To(Equal(older.ID))
+		})
 	})
 
 	Describe("ReleaseDeletionClaim", func() {
