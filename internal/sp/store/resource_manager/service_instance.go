@@ -64,6 +64,7 @@ type ServiceTypeInstance interface { //nolint:interfacebloat
 	// ClaimPendingDeletions atomically leases due SCHEDULED deletions for this
 	// worker. Only one replica wins each row (DB-backed claiming).
 	ClaimPendingDeletions(ctx context.Context, now, claimUntil time.Time, limit int) ([]model.ServiceTypeInstance, error)
+	ReleaseDeletionClaim(ctx context.Context, id string) error
 	IncrementDeletionRetry(ctx context.Context, id string) error
 	MarkDeletionFailed(ctx context.Context, id string) error
 	MarkDeletionComplete(ctx context.Context, id string) error
@@ -423,15 +424,27 @@ func (s *ServiceTypeInstanceStore) claimPendingDeletionsOptimistic(ctx context.C
 	return claimed, nil
 }
 
+// ReleaseDeletionClaim drops a deletion lease so another worker or the next
+// cleanup cycle can pick the row up. No-op when the row is not SCHEDULED.
+func (s *ServiceTypeInstanceStore) ReleaseDeletionClaim(ctx context.Context, id string) error {
+	result := s.db.WithContext(ctx).
+		Model(&model.ServiceTypeInstance{}).
+		Where("id = ? AND deletion_status = ?", id, DeletionStatusScheduled).
+		Update("deletion_claimed_until", nil)
+	if result.Error != nil {
+		return result.Error
+	}
+	return nil
+}
+
 func (s *ServiceTypeInstanceStore) IncrementDeletionRetry(ctx context.Context, id string) error {
 	now := time.Now()
 	result := s.db.WithContext(ctx).
 		Model(&model.ServiceTypeInstance{}).
 		Where("id = ?", id).
 		Updates(map[string]any{
-			"retry_count":            gorm.Expr("retry_count + 1"),
-			"last_deletion_attempt":  now,
-			"deletion_claimed_until": nil,
+			"retry_count":           gorm.Expr("retry_count + 1"),
+			"last_deletion_attempt": now,
 		})
 	if result.Error != nil {
 		return result.Error
@@ -472,7 +485,10 @@ func (s *ServiceTypeInstanceStore) MarkDeletionComplete(ctx context.Context, id 
 	result := s.db.WithContext(ctx).
 		Model(&model.ServiceTypeInstance{}).
 		Where("id = ?", id).
-		Update("deletion_status", DeletionStatusDeleted)
+		Updates(map[string]any{
+			"deletion_status":        DeletionStatusDeleted,
+			"deletion_claimed_until": nil,
+		})
 	if result.Error != nil {
 		return result.Error
 	}
@@ -493,7 +509,10 @@ func (s *ServiceTypeInstanceStore) MarkDeletionCompleteFromAgent(ctx context.Con
 	result := s.db.WithContext(ctx).
 		Model(&model.ServiceTypeInstance{}).
 		Where("id = ? AND agent_name = ?", id, agentName).
-		Update("deletion_status", DeletionStatusDeleted)
+		Updates(map[string]any{
+			"deletion_status":        DeletionStatusDeleted,
+			"deletion_claimed_until": nil,
+		})
 	if result.Error != nil {
 		return result.Error
 	}

@@ -764,6 +764,26 @@ var _ = Describe("ServiceTypeInstance Store", func() {
 		})
 	})
 
+	Describe("ReleaseDeletionClaim", func() {
+		It("clears an active lease so the row can be reclaimed", func() {
+			inst := addInstanceToStore(newServiceTypeInstance("release-claim", map[string]any{}))
+			Expect(s.MarkForDeletion(ctx, inst.ID)).To(Succeed())
+
+			now := time.Now()
+			claimUntil := now.Add(5 * time.Minute)
+			claimed, err := s.ClaimPendingDeletions(ctx, now, claimUntil, 0)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(claimed).To(HaveLen(1))
+
+			Expect(s.ReleaseDeletionClaim(ctx, inst.ID)).To(Succeed())
+
+			second, err := s.ClaimPendingDeletions(ctx, now, claimUntil, 0)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(second).To(HaveLen(1))
+			Expect(second[0].ID).To(Equal(inst.ID))
+		})
+	})
+
 	Describe("IncrementDeletionRetry", func() {
 		It("increments retry count and sets last_deletion_attempt", func() {
 			inst := addInstanceToStore(newServiceTypeInstance("retry-inst", map[string]any{}))
@@ -781,6 +801,23 @@ var _ = Describe("ServiceTypeInstance Store", func() {
 			found, err = s.Get(ctx, inst.ID, true)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(found.RetryCount).To(Equal(2))
+		})
+
+		It("keeps an active deletion lease after recording a publish attempt", func() {
+			inst := addInstanceToStore(newServiceTypeInstance("retry-keep-claim", map[string]any{}))
+			Expect(s.MarkForDeletion(ctx, inst.ID)).To(Succeed())
+
+			now := time.Now()
+			claimUntil := now.Add(5 * time.Minute)
+			claimed, err := s.ClaimPendingDeletions(ctx, now, claimUntil, 0)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(claimed).To(HaveLen(1))
+
+			Expect(s.IncrementDeletionRetry(ctx, inst.ID)).To(Succeed())
+
+			second, err := s.ClaimPendingDeletions(ctx, now, claimUntil.Add(time.Minute), 0)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(second).To(BeEmpty())
 		})
 
 		It("returns ErrInstanceNotFound for missing ID", func() {
